@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>商品券残高管理 - Standalone</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #f3f4f6; font-family: sans-serif; }
+        .card { background: white; border-radius: 1rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .loading-overlay { background: rgba(255,255,255,0.8); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div id="loading" class="fixed inset-0 loading-overlay">
+        <div class="text-center">
+            <div id="loading-text" class="text-gray-600 animate-pulse text-lg font-bold">データを読み込み中...</div>
+            <div id="error-instructions" class="hidden mt-4 p-4 bg-red-50 text-red-700 rounded-lg text-sm max-w-sm mx-auto">
+                <p class="font-bold mb-2">Firebaseの設定が正しくありません。</p>
+                <p class="text-xs text-left">Firebaseコンソールの「SDKの設定と構成」で<b>「Config」</b>を選択し、表示された内容をコード内の <b>firebaseConfig</b> に貼り付けてください。</p>
+                <p id="error-detail" class="mt-2 text-[10px] text-red-400 font-mono text-left"></p>
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-md mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-2xl font-bold text-gray-800">商品券残高マネージャー</h1>
+            <p class="text-gray-500 text-sm">マイ・クラウド保存版</p>
+        </header>
+
+        <div id="setup-section" class="card p-6 mb-6 hidden">
+            <h2 class="text-lg font-semibold mb-4 text-gray-700">初期設定</h2>
+            <div class="flex flex-col gap-3">
+                <label class="text-sm text-gray-600">商品券の総額（円）</label>
+                <input type="number" id="total-amount-input" class="border rounded-lg p-2 w-full focus:ring-2 focus:ring-blue-400 outline-none" placeholder="10000">
+                <button onclick="setInitialAmount()" class="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition">設定を保存</button>
+            </div>
+        </div>
+
+        <div id="dashboard" class="hidden">
+            <div class="card p-6 mb-6 bg-gradient-to-br from-blue-500 to-indigo-600 text-white">
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-blue-100">現在の残高</span>
+                    <button onclick="resetApp()" class="text-xs bg-white/20 hover:bg-white/30 px-2 py-1 rounded">リセット</button>
+                </div>
+                <div class="text-4xl font-bold mb-4">¥ <span id="current-balance">0</span></div>
+                <div class="w-full bg-white/20 rounded-full h-2">
+                    <div id="progress-bar" class="bg-white h-2 rounded-full" style="width: 100%"></div>
+                </div>
+                <div class="flex justify-between text-xs mt-2 text-blue-100">
+                    <span>総額: ¥<span id="display-total">0</span></span>
+                    <span>使用済み: ¥<span id="display-spent">0</span></span>
+                </div>
+            </div>
+
+            <div class="card p-6 mb-6">
+                <h2 class="text-lg font-semibold mb-4 text-gray-700">使用記録を追加</h2>
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <input type="date" id="usage-date" class="border rounded-lg p-2 w-full text-sm">
+                        <input type="number" id="usage-amount" class="border rounded-lg p-2 w-full text-sm" placeholder="金額">
+                    </div>
+                    <input type="text" id="usage-memo" class="border rounded-lg p-2 w-full text-sm" placeholder="メモ（店名など）">
+                    <button id="add-btn" onclick="addEntry()" class="w-full bg-green-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-green-700 transition">記録する</button>
+                </div>
+            </div>
+            <div class="card p-6"><h2 class="text-lg font-semibold mb-4 text-gray-700">履歴</h2><div id="history-list" class="space-y-3"></div></div>
+        </div>
+    </div>
+
+    <div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 bg-gray-800 text-white px-4 py-2 rounded-lg opacity-0 transition-opacity pointer-events-none z-50"></div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- IMPORTANT: REPLACE WITH YOUR OWN CONFIG FROM FIREBASE CONSOLE (Select "Config" radio button) ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAY029Q6xaKPir5pn4e5BW8WQ55mZttTdk",
+            authDomain: "giftcardmanager-a6c53.firebaseapp.com",
+            projectId: "giftcardmanager-a6c53",
+            storageBucket: "giftcardmanager-a6c53.firebasestorage.app",
+            messagingSenderId: "1010030352061",
+            appId: "1:1010030352061:web:ed26927b141b8a3f6709d4"
+        };
+
+        // Application State
+        let currentUser = null;
+        let appData = { total: 0, entries: [] };
+        let db, auth;
+
+        // UI Update Function
+        function updateUI() {
+            const spent = appData.entries.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+            const balance = (Number(appData.total) || 0) - spent;
+            
+            document.getElementById('current-balance').innerText = balance.toLocaleString();
+            document.getElementById('display-total').innerText = (Number(appData.total) || 0).toLocaleString();
+            document.getElementById('display-spent').innerText = spent.toLocaleString();
+            
+            const progress = appData.total > 0 ? Math.max(0, (balance / appData.total) * 100) : 0;
+            document.getElementById('progress-bar').style.width = progress + "%";
+
+            const historyList = document.getElementById('history-list');
+            let tempBal = Number(appData.total) || 0;
+            const sorted = [...appData.entries].sort((a,b) => new Date(a.date) - new Date(b.date));
+            const balMap = {};
+            sorted.forEach(e => { 
+                tempBal -= (Number(e.amount) || 0); 
+                balMap[e.id] = tempBal; 
+            });
+
+            historyList.innerHTML = appData.entries.map(e => `
+                <div class="flex justify-between items-start p-3 border-b border-gray-100 last:border-0">
+                    <div class="flex-1 pr-2">
+                        <div class="text-[10px] text-gray-400">${e.date}</div>
+                        <div class="font-bold text-sm">¥${(Number(e.amount) || 0).toLocaleString()}</div>
+                        <div class="text-xs text-gray-500 truncate">${e.memo || ""}</div>
+                    </div>
+                    <div class="text-right flex items-center gap-3">
+                        <div>
+                            <div class="text-[10px] text-gray-400">残額</div>
+                            <div class="text-sm font-bold text-blue-600">¥${(balMap[e.id] || 0).toLocaleString()}</div>
+                        </div>
+                        <button onclick="deleteEntry('${e.id}')" class="text-gray-300 hover:text-red-500">×</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function showSetup() { 
+            document.getElementById('setup-section').classList.remove('hidden'); 
+            document.getElementById('dashboard').classList.add('hidden'); 
+        }
+
+        function subscribeToData(userId) {
+            onSnapshot(doc(db, 'users', userId, 'config', 'main'), (snap) => {
+                if (snap.exists()) {
+                    appData.total = snap.data().total || 0;
+                    if (appData.total > 0) {
+                        document.getElementById('setup-section').classList.add('hidden');
+                        document.getElementById('dashboard').classList.remove('hidden');
+                    } else {
+                        showSetup();
+                    }
+                } else {
+                    showSetup();
+                }
+                document.getElementById('loading').classList.add('hidden');
+                updateUI();
+            }, (error) => {
+                console.error("Firestore settings error:", error);
+                document.getElementById('loading-text').innerText = "Firestore接続エラー";
+                document.getElementById('error-instructions').classList.remove('hidden');
+                document.getElementById('error-detail').innerText = error.message;
+            });
+
+            onSnapshot(collection(db, 'users', userId, 'entries'), (snap) => {
+                const entries = [];
+                snap.forEach(d => entries.push({ id: d.id, ...d.data() }));
+                appData.entries = entries.sort((a, b) => new Date(b.date) - new Date(a.date));
+                updateUI();
+            }, (error) => {
+                console.error("Firestore entries error:", error);
+            });
+        }
+
+        // Initialize Firebase
+        if (!firebaseConfig.apiKey || firebaseConfig.apiKey === "YOUR_API_KEY") {
+            document.getElementById('loading-text').innerText = "設定エラー";
+            document.getElementById('error-instructions').classList.remove('hidden');
+        } else {
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUser = user;
+                        subscribeToData(user.uid);
+                    } else {
+                        try {
+                            await signInAnonymously(auth);
+                        } catch (e) {
+                            console.error("Auth failed:", e);
+                            document.getElementById('loading-text').innerText = "認証エラー";
+                            document.getElementById('error-instructions').classList.remove('hidden');
+                            document.getElementById('error-detail').innerText = e.message;
+                        }
+                    }
+                });
+
+                // Global Functions
+                window.setInitialAmount = async () => {
+                    const amount = parseInt(document.getElementById('total-amount-input').value);
+                    if (amount > 0 && currentUser) {
+                        await setDoc(doc(db, 'users', currentUser.uid, 'config', 'main'), { total: amount });
+                    }
+                };
+
+                window.addEntry = async () => {
+                    const d = document.getElementById('usage-date').value;
+                    const a = parseInt(document.getElementById('usage-amount').value);
+                    const m = document.getElementById('usage-memo').value;
+                    if (d && a > 0 && currentUser) {
+                        await addDoc(collection(db, 'users', currentUser.uid, 'entries'), { 
+                            date: d, 
+                            amount: a, 
+                            memo: m || "未設定", 
+                            createdAt: Date.now() 
+                        });
+                        document.getElementById('usage-amount').value = ""; 
+                        document.getElementById('usage-memo').value = "";
+                    }
+                };
+
+                window.deleteEntry = async (id) => {
+                    if (currentUser && confirm("削除しますか？")) {
+                        await deleteDoc(doc(db, 'users', currentUser.uid, 'entries', id));
+                    }
+                };
+
+                window.resetApp = async () => {
+                    if (currentUser && confirm("全データをリセットしますか？")) {
+                        await setDoc(doc(db, 'users', currentUser.uid, 'config', 'main'), { total: 0 });
+                    }
+                };
+            } catch (e) {
+                console.error("Initialization failed:", e);
+                document.getElementById('loading-text').innerText = "初期化エラー";
+                document.getElementById('error-instructions').classList.remove('hidden');
+                document.getElementById('error-detail').innerText = e.message;
+            }
+        }
+
+        document.getElementById('usage-date').valueAsDate = new Date();
+    </script>
+</body>
+</html>
